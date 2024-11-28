@@ -46,6 +46,8 @@ from fastchat.modules.xfastertransformer import load_xft_model, XftConfig
 from fastchat.modules.gptq import GptqConfig, load_gptq_quantized
 from fastchat.utils import get_gpu_memory
 
+from fastchat.llm_judge.H2O.utils.llama import H2OLlamaForCausalLM
+
 # Check an environment variable to check if we should be sharing Peft model
 # weights.  When false we treat all Peft models as separate.
 peft_share_base_weights = (
@@ -622,6 +624,56 @@ def remove_parent_directory_name(model_path):
     if model_path[-1] == "/":
         model_path = model_path[:-1]
     return model_path.split("/")[-1]
+
+
+class MotifH2OAdapter(BaseModelAdapter):
+    """The model adapter for Motif-102B_H2O"""
+
+    def match(self, model_path: str):
+        return True
+
+    def load_model(self, model_path: str, from_pretrained_kwargs: dict):
+        revision = from_pretrained_kwargs.get("revision", "main")
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_path,
+                use_fast=self.use_fast_tokenizer,
+                revision=revision,
+                trust_remote_code=True,
+            )
+        except TypeError:
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_path, use_fast=False, revision=revision, trust_remote_code=True
+            )
+        try:
+            config = AutoConfig.from_pretrained(model_path, revision=revision)
+            config.num_heavy_hitter_tokens = 128
+            config.num_window_length = 256
+            config.enable_position_rolling = True
+            model = H2OLlamaForCausalLM.from_pretrained(
+                model_path,
+                low_cpu_mem_usage=True,
+                trust_remote_code=True,
+                **from_pretrained_kwargs,
+                config=config
+            )
+        except NameError:
+            model = AutoModel.from_pretrained(
+                model_path,
+                low_cpu_mem_usage=True,
+                trust_remote_code=True,
+                **from_pretrained_kwargs,
+            )
+        return model, tokenizer
+
+    def get_default_conv_template(self, model_path: str) -> Conversation:
+        if model_path.lower() in [
+            "llama-3.1-8b-instruct",
+            "llama-3.1-70b-instruct",
+            "the-real-chatbot-v2",
+        ]:
+            return get_conv_template("meta-llama-3.1-sp")
+        return get_conv_template("meta-llama-3.1")
 
 
 peft_model_cache = {}
@@ -1618,7 +1670,6 @@ class Llama31Adapter(BaseModelAdapter):
             return get_conv_template("meta-llama-3.1-sp")
         return get_conv_template("meta-llama-3.1")
 
-
 class GrokAdapter(BaseModelAdapter):
     def match(self, model_path: str):
         return "grok" in model_path.lower()
@@ -2502,6 +2553,7 @@ class NoSystemAdapter(BaseModelAdapter):
 
 # Note: the registration order matters.
 # The one registered earlier has a higher matching priority.
+register_model_adapter(MotifH2OAdapter)
 register_model_adapter(PeftModelAdapter)
 register_model_adapter(StableVicunaAdapter)
 register_model_adapter(VicunaAdapter)
