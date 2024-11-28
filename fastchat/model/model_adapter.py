@@ -46,6 +46,8 @@ from fastchat.modules.xfastertransformer import load_xft_model, XftConfig
 from fastchat.modules.gptq import GptqConfig, load_gptq_quantized
 from fastchat.utils import get_gpu_memory
 
+from fastchat.llm_judge.snapkv.monkeypatch.monkeypatch import replace_llama
+
 # Check an environment variable to check if we should be sharing Peft model
 # weights.  When false we treat all Peft models as separate.
 peft_share_base_weights = (
@@ -626,6 +628,48 @@ def remove_parent_directory_name(model_path):
 
 peft_model_cache = {}
 
+class MotifSnapKVAdapter(BaseModelAdapter):
+    """The model adapter for Motif-102B_SnapKV"""
+    def match(self, model_path: str):
+        return True
+    def load_model(self, model_path: str, from_pretrained_kwargs: dict):
+        replace_llama()
+        revision = from_pretrained_kwargs.get("revision", "main")
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_path,
+                use_fast=self.use_fast_tokenizer,
+                revision=revision,
+                trust_remote_code=True,
+            )
+        except TypeError:
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_path, use_fast=False, revision=revision, trust_remote_code=True
+            )
+        try:
+            model = AutoModelForCausalLM.from_pretrained(
+                model_path,
+                low_cpu_mem_usage=True,
+                trust_remote_code=True,
+                **from_pretrained_kwargs,
+                use_flash_attention_2=True
+            )
+        except NameError:
+            model = AutoModel.from_pretrained(
+                model_path,
+                low_cpu_mem_usage=True,
+                trust_remote_code=True,
+                **from_pretrained_kwargs,
+            )
+        return model, tokenizer
+    def get_default_conv_template(self, model_path: str) -> Conversation:
+        if model_path.lower() in [
+            "llama-3.1-8b-instruct",
+            "llama-3.1-70b-instruct",
+            "the-real-chatbot-v2",
+        ]:
+            return get_conv_template("meta-llama-3.1-sp")
+        return get_conv_template("meta-llama-3.1")
 
 class PeftModelAdapter:
     """Loads any "peft" model and it's base model."""
@@ -2502,6 +2546,7 @@ class NoSystemAdapter(BaseModelAdapter):
 
 # Note: the registration order matters.
 # The one registered earlier has a higher matching priority.
+register_model_adapter(MotifSnapKVAdapter)
 register_model_adapter(PeftModelAdapter)
 register_model_adapter(StableVicunaAdapter)
 register_model_adapter(VicunaAdapter)
